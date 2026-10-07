@@ -192,28 +192,93 @@ curl.exe http://127.0.0.1:8080/v1/models
 
 ## 五、日后怎么停，以及两个补充
 
+<a name="cleanup"></a>
+
 ### 12. 停止代理、禁用自启、删除任务
 
-临时停止手动启动的代理，在它的终端窗口按 Ctrl+C。
+先区分两个目标：**暂时不用**，保留任务和文件，日后可以恢复；**彻底不再使用**，清理插件配置、自启入口、后台进程和本地文件。下面以 `D:\IndexTranslate` 和任务名 `Index Translate Proxy` 为例；如果当初用了其他目录或任务名，请替换成自己的实际值。
 
-对于静默启动的代理，在 PowerShell 执行：
+#### 临时停用：先禁用自启，再停止当前代理
+
+在“任务计划程序 → 任务计划程序库”中找到 `Index Translate Proxy`，右键选择“禁用”。这样下次登录不会再由这个任务启动代理；需要恢复时可以重新“启用”。
+
+如果代理是在终端里手动启动的，在原窗口按 **Ctrl+C**。如果是静默启动的，在 PowerShell 执行：
 
 ```powershell
 netstat -ano | findstr :8080
 ```
 
-找到本地地址为 `127.0.0.1:8080`、状态为 `LISTENING` 的那一行，最右侧数字是进程 PID。假设是 `12345`，先确认它是这次代理使用的 Python，再停止：
+找到本地地址为 `127.0.0.1:8080`、状态为 `LISTENING` 的那一行，最右侧数字是进程 PID。假设是 `12345`，先查清它的身份：
 
 ```powershell
-tasklist /FI "PID eq 12345"
+Get-CimInstance Win32_Process -Filter "ProcessId = 12345" |
+    Format-List ProcessId,Name,CommandLine
+```
+
+确认 `CommandLine` 中指向自己的 `D:\IndexTranslate\call_api.py`，并带有 `--serve`，再单独执行：
+
+```powershell
 taskkill /PID 12345 /F
 ```
 
-把 `12345` 换成实际数字。若占用者不是这个代理，先查清楚，避免结束其他程序。
+把 `12345` 换成刚查到的实际 PID。不要只凭进程名是 Python 就结束它，也不要批量结束所有 Python 进程。若提示进程不存在，重新查询；若提示拒绝访问，再尝试以管理员身份打开 PowerShell。
 
-不想下次登录时启动，在任务计划程序中右键 `Index Translate Proxy`，选择“禁用”；需要恢复时再“启用”。彻底取消自启则选择“删除”，随后停止当前代理，再按需删除 `D:\IndexTranslate` 中的文件。
+> “禁用”“删除”任务和停止后台进程是不同操作。这个 VBS 启动 Python 后会退出，任务计划程序里的“结束”也不能作为代理已停止的证据。微软说明同样指出，[删除计划任务不会中断正在运行的程序](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-delete)。
 
-> 禁用或删除任务不会自动停止已经启动的 Python。这个 VBS 启动后会退出，也不要只靠任务计划程序的“结束”来判断代理已停止。
+#### 彻底不再使用：按下面顺序清理
+
+**先移除插件里的连接配置。** 在陪读蛙中切换到其他翻译服务，再删除这次添加的 OpenAI 兼容服务商；沉浸式翻译等插件则删除对应自定义服务，或清除本次填写的地址、模型名和 `index` 占位 Key。仅删除本方案的配置，其他服务商的密钥和设置可以保留。如果整个插件也不再使用，可在浏览器扩展管理页卸载它；若插件通过账号或浏览器同步这些设置，也检查自己仍在使用的其他浏览器。
+
+**删除这次创建的自启任务。** 在任务计划程序中打开任务属性，核对“操作”确实使用 `wscript.exe` 启动自己的 `start_proxy.vbs`。先“禁用”，再右键“删除”。如果任务被改名或放进了子文件夹，到实际位置查找；如果以前建立了多个指向同一脚本的任务，也逐个核对处理。
+
+习惯用命令的读者，也可以先查看指定任务，再删除：
+
+```powershell
+schtasks /query /tn "Index Translate Proxy" /v /fo LIST
+```
+
+核对路径后，单独执行下面命令，并按提示确认。任务位于子文件夹时，`/tn` 后填写包含文件夹的完整任务路径：
+
+```powershell
+schtasks /delete /tn "Index Translate Proxy"
+```
+
+**停止所有属于这套配置的代理进程。** 先按上面的端口查询方法停止正在监听的实例。为避免漏掉未正常监听 8080 的实例，再执行这个只做查询的命令：
+
+```powershell
+Get-CimInstance Win32_Process |
+    Where-Object {
+        $_.Name -eq "python.exe" -and
+        $_.CommandLine -like '*D:\IndexTranslate\call_api.py*' -and
+        $_.CommandLine -match '\s--serve(?:\s|$)'
+    } |
+    Format-List ProcessId,Name,CommandLine
+```
+
+若列出进程，核对完整命令行，然后按每个实际 PID 分别执行 `taskkill /PID 实际数字 /F`；“实际数字”要替换后才能运行。如果自定义了文件路径，这条查询里的路径也要一起改。没有输出只能表示没有查到匹配项；查询报错、命令行为空或无权读取时，不能当作清理成功。
+
+**检查是否还加过其他自启入口。** 按本文配置只需处理任务计划程序。如果后来又增加过启动快捷方式，按 Win+R，分别打开 `shell:startup` 和 `shell:common startup`，查看快捷方式属性，只删除目标或参数指向这套脚本的快捷方式。不要清空启动文件夹，也不用为此修改注册表。
+
+**再删除本地文件。** 确认相关进程已经停止后，在资源管理器打开实际使用的目录，删除：
+
+| 文件 | 用途 |
+| --- | --- |
+| `call_api.py` | 官方调用与转发脚本 |
+| `start_proxy.vbs` | 静默启动脚本 |
+| `proxy.log` | 本地运行日志 |
+
+自己另存的这些文件的备份、日志副本也可一并清理。如果目录里只有本方案的文件，可删除整个 `D:\IndexTranslate` 文件夹；若混放了其他资料，只删上表中核对过的文件。想永久删除时，在回收站中选中这些文件删除即可，不必清空整个回收站。
+
+Python 可能还供其他软件使用，不作为这项教程的残留一并卸载；如果确实是专门为此安装、也确定没有其他用途，再到 Windows“已安装的应用”中单独卸载。本方案没有下载模型权重，也没有安装 vLLM，因此无需寻找或删除模型缓存。GitHub 上的教程和封面可以继续保留作资料。
+
+**最后重启一次，确认没有重新启动。** 保存其他工作，重启并登录 Windows，不手动启动脚本。核对以下各项：
+
+- 任务计划程序中已没有这次创建的任务；`schtasks /query /tn "Index Translate Proxy"` 提示任务不存在，而不是权限错误。如果改过名字或位置，用实际任务路径查询。
+- 再执行上面的按脚本路径查询进程的命令，没有匹配的代理进程。
+- `netstat -ano | findstr :8080` 不再出现这套代理的 `LISTENING` 行。`TIME_WAIT` 等连接记录不代表仍有服务监听；若 8080 被其他程序使用，核对 PID 和命令行，不要误停其他程序。状态说明见 [微软 netstat 文档](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netstat)。
+- 插件中已移除本方案的连接配置；原目录中的上述文件已删除，额外建立的相关自启入口也已移除。
+
+这些检查可以确认本文配置的代理已停止、不会随登录重新启动，相关连接设置和运行文件也已清理。
 
 ### 13. 几个容易混淆的问题
 
